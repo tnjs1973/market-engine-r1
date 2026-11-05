@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#0b1425">
+  <title>R1 Mic Diagnostic</title>
+  <style>
+    :root { font-family:Arial,Helvetica,sans-serif; color:#f2f6ff; background:#0b1425; }
+    * { box-sizing:border-box; }
+    html,body { margin:0; width:100%; height:100%; overflow:hidden; }
+    button { font:inherit; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+    .app { width:100%; height:100dvh; max-height:100dvh; padding:8px; display:flex; flex-direction:column; gap:6px; }
+    header { display:flex; justify-content:space-between; align-items:center; min-height:18px; }
+    h1 { margin:0; font-size:13px; letter-spacing:.3px; }
+    h1 em { color:#ff8b48; font-style:normal; }
+    .pill { font-size:9px; border:1px solid #56677e; border-radius:20px; padding:3px 6px; color:#b8cce7; }
+    .panel { background:#121f34; border:1px solid #2c3d57; border-radius:10px; padding:8px; flex:1; min-height:0; overflow:auto; }
+    .status { font-size:13px; font-weight:800; color:#ffbd85; margin-bottom:6px; line-height:1.2; overflow-wrap:anywhere; }
+    .hint { font-size:9px; color:#b8cbe5; line-height:1.3; margin-bottom:6px; }
+    .meter-track { height:13px; width:100%; border:1px solid #415575; background:#091529; border-radius:9px; overflow:hidden; margin:5px 0 7px; }
+    .meter-fill { height:100%; width:0%; background:linear-gradient(90deg,#3ac49a,#f3b44c,#f16d3b); }
+    .stats { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+    .stat { background:#1a2b45; border-radius:6px; padding:5px 6px; min-width:0; }
+    .stat label { display:block; font-size:8px; color:#9eb5d1; margin-bottom:2px; }
+    .stat b { display:block; font-size:12px; overflow-wrap:anywhere; }
+    .error { font-size:9px; color:#ffb4a7; margin-top:5px; overflow-wrap:anywhere; }
+    .controls { display:grid; grid-template-columns:1fr 1fr; gap:6px; flex:0 0 auto; }
+    .button { border:1px solid #536d8d; background:#203654; color:white; min-height:42px; border-radius:8px; font-size:11px; font-weight:800; }
+    .button.primary { background:#eb622a; border-color:#eb622a; touch-action:none; }
+    .button.primary:active { background:#ff8f52; }
+    footer { font-size:8px; color:#97aaca; text-align:center; line-height:1.2; }
+    @media (min-width:400px) { .app { max-width:240px; max-height:282px; margin:24px auto; border:1px solid #34455d; border-radius:14px; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header><h1>MARKET <em>ENGINE</em> MIC</h1><span class="pill">DIAG 0.3</span></header>
+    <main class="panel" aria-live="polite">
+      <div class="status" id="status">READY — MIC OFF</div>
+      <div class="hint" id="hint">1. Tap ENABLE MIC. 2. Speak and watch meter. 3. Hold side button, then release.</div>
+      <div class="meter-track" role="meter" aria-label="Microphone audio level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="meter"><div class="meter-fill" id="level"></div></div>
+      <div class="stats">
+        <div class="stat"><label>MIC API</label><b id="mic-api">Checking</b></div>
+        <div class="stat"><label>AUDIO TRACK</label><b id="track">None</b></div>
+        <div class="stat"><label>PTT START / END</label><b id="ptt">0 / 0</b></div>
+        <div class="stat"><label>LAST CAPTURE</label><b id="capture">None</b></div>
+      </div>
+      <div class="error" id="error" aria-live="assertive"></div>
+    </main>
+    <div class="controls">
+      <button class="button" id="enable" type="button">ENABLE MIC</button>
+      <button class="button primary" id="hold" type="button">HOLD TO TEST</button>
+    </div>
+    <footer>Local-only diagnostic • no upload • audio discarded</footer>
+  </div>
+  <script>
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const st = {stream:null, recorder:null, audioContext:null, source:null, analyser:null, meterTimer:null,
+      pttStart:0, pttEnd:0, recordedBytes:0, startedAt:0, recording:false, sourceName:""};
+
+    function message(status,hint,error) {
+      $("status").textContent=status;
+      if (hint !== undefined) $("hint").textContent=hint;
+      $("error").textContent=error || "";
+    }
+    function showPTT() { $("ptt").textContent=st.pttStart+" / "+st.pttEnd; }
+    function apiStatus() {
+      const mic=Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      $("mic-api").textContent=mic ? "Available" : "Unavailable";
+      if (!mic) message("MIC API UNAVAILABLE","The R1 WebView may block direct microphone access.","getUserMedia unavailable in this Creation.");
+    }
+    function startMeter() {
+      const Context=window.AudioContext || window.webkitAudioContext;
+      if (!Context || !st.stream) return;
+      try {
+        st.audioContext=new Context();
+        st.source=st.audioContext.createMediaStreamSource(st.stream);
+        st.analyser=st.audioContext.createAnalyser();
+        st.analyser.fftSize=512;
+        st.source.connect(st.analyser); // Never connect microphone to speakers.
+        const buffer=new Uint8Array(st.analyser.fftSize);
+        st.meterTimer=setInterval(() => {
+          if (!st.analyser) return;
+          st.analyser.getByteTimeDomainData(buffer);
+          let energy=0;
+          for (const sample of buffer) { const centered=(sample-128)/128; energy+=centered*centered; }
+          const rms=Math.sqrt(energy/buffer.length);
+          const level=Math.min(100,Math.round(rms*400));
+          $("level").style.width=level+"%";
+          $("meter").setAttribute("aria-valuenow",String(level));
+        },120);
+      } catch (error) { $("error").textContent="Meter unavailable: "+error.name; }
+    }
+    async function enableMic() {
+      if (st.stream) { disableMic(); return; }
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia!=="function") {
+        message("MIC API UNAVAILABLE","Use the error below to report this result.","The browser did not expose getUserMedia.");
+        return;
+      }
+      message("REQUESTING MIC","Approve microphone access if a permission prompt appears.");
+      try {
+        const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+        const tracks=stream.getAudioTracks();
+        if (!tracks.length) { stream.getTracks().forEach(track=>track.stop()); throw new Error("No audio track returned"); }
+        st.stream=stream;
+        $("track").textContent="Active";
+        $("enable").textContent="DISABLE MIC";
+        tracks[0].addEventListener("ended",() => {
+          if (st.stream===stream) disableMic();
+        });
+        startMeter();
+        message("MIC ACTIVE","Speak: the level bar should move. Then hold and release the side button.");
+      } catch (error) {
+        message("MIC ACCESS FAILED","Note the exact error and tell me what you see.",(error.name||"Error")+": "+(error.message||"Access denied"));
+      }
+    }
+    function disableMic() {
+      if (st.recorder && st.recorder.state!=="inactive") st.recorder.stop();
+      st.recorder=null; st.recording=false;
+      if (st.meterTimer) clearInterval(st.meterTimer);
+      st.meterTimer=null;
+      if (st.source) st.source.disconnect();
+      st.source=null; st.analyser=null;
+      if (st.audioContext) st.audioContext.close().catch(()=>{});
+      st.audioContext=null;
+      if (st.stream) st.stream.getTracks().forEach(track=>track.stop());
+      st.stream=null;
+      $("track").textContent="None";
+      $("enable").textContent="ENABLE MIC";
+      $("level").style.width="0%";
+      $("meter").setAttribute("aria-valuenow","0");
+      message("MIC OFF","No audio is being captured. Tap ENABLE MIC to test again.");
+    }
+    function beginCapture(sourceName) {
+      if (st.recording) return;
+      if (!st.stream) {
+        message("ENABLE MIC FIRST","Tap ENABLE MIC, then try the side button or touch-and-hold.");
+        return;
+      }
+      if (typeof window.MediaRecorder!=="function") {
+        message("RECORDER UNAVAILABLE","The meter can still prove microphone access.","MediaRecorder is unavailable.");
+        return;
+      }
+      try {
+        const formats=["audio/webm;codecs=opus","audio/webm","audio/mp4"];
+        const supported=formats.find(type=>window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(type));
+        const recorder=supported ? new window.MediaRecorder(st.stream,{mimeType:supported}) : new window.MediaRecorder(st.stream);
+        st.recorder=recorder; st.recordedBytes=0; st.startedAt=Date.now(); st.sourceName=sourceName;
+        recorder.ondataavailable=(event) => { if (event.data) st.recordedBytes+=event.data.size; };
+        recorder.onerror=(event) => message("RECORDER ERROR","Share this result.",event.error?.name||"Unknown MediaRecorder error");
+        recorder.onstop=() => {
+          st.recording=false;
+          const duration=((Date.now()-st.startedAt)/1000).toFixed(1);
+          $("capture").textContent=st.recordedBytes+" B / "+duration+"s";
+          message(st.recordedBytes>0 ? "AUDIO CAPTURED" : "ZERO AUDIO BYTES",
+            `${sourceName}: ${duration}s recorded, ${st.recordedBytes} bytes. Audio discarded.`);
+          st.recorder=null; // Recording data is never stored or sent.
+        };
+        recorder.start(200);
+        st.recording=true;
+        message("RECORDING...",sourceName+": speak for two seconds, then release.");
+      } catch (error) {
+        st.recording=false;
+        message("RECORDING FAILED","Report the error below.",(error.name||"Error")+": "+error.message);
+      }
+    }
+    function endCapture() {
+      if (st.recorder && st.recorder.state!=="inactive") {
+        try { st.recorder.stop(); } catch (error) { $("error").textContent=error.name+": "+error.message; }
+      }
+    }
+    $("enable").addEventListener("click",enableMic);
+    const hold=$("hold");
+    hold.addEventListener("pointerdown",event => {
+      event.preventDefault();
+      if (hold.setPointerCapture) hold.setPointerCapture(event.pointerId);
+      beginCapture("TOUCH");
+    });
+    hold.addEventListener("pointerup",endCapture);
+    hold.addEventListener("pointercancel",endCapture);
+    window.addEventListener("longPressStart",() => { st.pttStart++; showPTT(); beginCapture("SIDE PTT"); });
+    window.addEventListener("longPressEnd",() => { st.pttEnd++; showPTT(); endCapture(); });
+    document.addEventListener("visibilitychange",() => { if (document.hidden) disableMic(); });
+    window.addEventListener("pagehide",disableMic);
+    apiStatus();
+    window.r1MicDiagnostic={ enableMic,disableMic,beginCapture,endCapture,read:()=>({
+      pttStart:st.pttStart,pttEnd:st.pttEnd,recording:st.recording,hasStream:Boolean(st.stream),bytes:st.recordedBytes
+    })};
+  </script>
+</body>
+</html>
