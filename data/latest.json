@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "source": null,
+  "updatedAtUTC": null,
+  "tickers": {
+    "SPY": {"verified": false},
+    "QQQ": {"verified": false},
+    "MU": {"verified": false},
+    "WMT": {"verified": false}
+  }
+}

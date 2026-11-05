@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#0b1425">
+  <title>Market Engine R1</title>
+  <style>
+    :root { font-family: Arial, Helvetica, sans-serif; color:#f3f6fc; background:#0b1425; font-synthesis:none; }
+    * { box-sizing:border-box; }
+    html,body { margin:0; width:100%; height:100%; overflow:hidden; }
+    button { font:inherit; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+    .app { width:100%; height:100dvh; max-height:100dvh; padding:8px; display:flex; flex-direction:column; gap:7px; overflow:hidden; }
+    .top { display:flex; align-items:center; justify-content:space-between; gap:4px; min-height:18px; }
+    .brand { font-size:12px; font-weight:800; letter-spacing:.6px; color:#fff; white-space:nowrap; }
+    .brand em { color:#ff8a43; font-style:normal; }
+    .status { font-size:8px; border:1px solid #41516e; border-radius:99px; padding:3px 5px; white-space:nowrap; color:#b9c8df; }
+    .status.ok { color:#72e6ba; border-color:#277658; }
+    .status.error { color:#ffb5aa; border-color:#9e463e; }
+    .tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
+    .tab { min-height:28px; border-radius:7px; border:1px solid #273854; background:#16253d; color:#bdcce2; font-size:12px; font-weight:bold; }
+    .tab[aria-selected="true"] { background:#ed682e; border-color:#ed682e; color:#fff; }
+    .main { min-height:0; flex:1; border:1px solid #273650; border-radius:10px; background:#111e33; padding:8px; overflow:auto; scrollbar-width:none; }
+    .main::-webkit-scrollbar { display:none; }
+    .headline { display:flex; justify-content:space-between; align-items:center; gap:4px; }
+    .ticker { font-size:23px; font-weight:800; line-height:1; }
+    .price { text-align:right; font-size:21px; font-weight:750; line-height:1.1; font-variant-numeric:tabular-nums; }
+    .subline { font-size:9px; color:#91a6c6; display:flex; justify-content:space-between; margin-top:4px; gap:5px; }
+    .rule { border-top:1px solid #263550; margin:8px 0 7px; }
+    .label { font-size:8px; letter-spacing:.7px; font-weight:800; color:#8da8c9; text-transform:uppercase; }
+    .signal { margin:3px 0 5px; font-size:14px; font-weight:800; color:#ffca99; }
+    .signal.good { color:#75e4b8; }
+    .signal.bad { color:#ff9991; }
+    .note { font-size:10px; line-height:1.35; color:#d3def0; overflow-wrap:anywhere; }
+    .levels { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:8px; }
+    .level { border:1px solid #293a57; border-radius:5px; background:#172841; padding:5px; min-width:0; }
+    .level strong { display:block; font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .level small { display:block; font-size:8px; color:#9ab2d0; margin-top:2px; }
+    .bottom { display:grid; grid-template-columns:1fr 1fr; gap:6px; flex:0 0 auto; }
+    .action { border:1px solid #405473; background:#1c304d; color:#fff; border-radius:8px; min-height:33px; font-size:11px; font-weight:750; }
+    .action.primary { background:#e76026; border-color:#e76026; }
+    .footer { color:#91a3bf; font-size:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center; }
+    .warning { color:#ffbc94; }
+    @media (prefers-reduced-motion:no-preference) { button:active { transform:scale(.97); } }
+    @media (min-width:400px) { .app { max-width:240px; max-height:282px; margin:24px auto; border:1px solid #34455d; border-radius:14px; } }
+  </style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Market Engine R1">
+    <header class="top">
+      <div class="brand">MARKET <em>ENGINE</em> / R1</div>
+      <span class="status" id="connection">NOT CONNECTED</span>
+    </header>
+    <nav class="tabs" aria-label="Watchlist" id="tabs"></nav>
+    <main class="main" id="panel" aria-live="polite"></main>
+    <div class="bottom">
+      <button class="action" id="refresh" type="button">↻ REFRESH</button>
+      <button class="action primary" id="speak" type="button">▶ SPEAK</button>
+    </div>
+    <div class="footer" id="footer">Read-only research · no orders</div>
+  </div>
+  <script>
+    "use strict";
+    const TICKERS = ["SPY", "QQQ", "MU", "WMT"];
+    const DEFAULT_NOTE = "Market Engine 2 has not been connected. Quotes, patterns and levels are unavailable.";
+    const state = { selected:0, feed:null, connected:false, error:"" };
+    const byId = (id) => document.getElementById(id);
+
+    function validNumber(value) {
+      return typeof value === "number" && Number.isFinite(value);
+    }
+    function money(value) {
+      return validNumber(value) ? "$" + value.toFixed(2) : "—";
+    }
+    function timeLabel(iso) {
+      if (typeof iso !== "string" || !iso) return "No timestamp";
+      const date = new Date(iso);
+      if (Number.isNaN(date.valueOf())) return "Invalid timestamp";
+      return date.toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/New_York",timeZoneName:"short"});
+    }
+    function plain(value, fallback) {
+      return typeof value === "string" && value.trim() ? value.trim().slice(0,180) : fallback;
+    }
+    function make(tag, cls, content) {
+      const el = document.createElement(tag);
+      if (cls) el.className = cls;
+      if (content !== undefined) el.textContent = content;
+      return el;
+    }
+    function selectedRecord() {
+      const symbol = TICKERS[state.selected];
+      const record = state.feed?.tickers?.[symbol];
+      // Do not display numbers from incomplete or unverified feeds.
+      return record && record.verified === true && state.feed?.source && state.feed?.updatedAtUTC ? record : null;
+    }
+    function renderTabs() {
+      const host = byId("tabs");
+      host.replaceChildren();
+      TICKERS.forEach((symbol,index) => {
+        const button = make("button","tab",symbol);
+        button.type = "button";
+        button.setAttribute("aria-selected", String(index === state.selected));
+        button.onclick = () => { state.selected=index; render(); };
+        host.append(button);
+      });
+    }
+    function render() {
+      renderTabs();
+      const symbol = TICKERS[state.selected];
+      const record = selectedRecord();
+      const badge = byId("connection");
+      badge.textContent = record ? "SAVED DATA" : state.error ? "FEED ERROR" : "NO DATA";
+      badge.className = "status" + (state.error ? " error" : record ? " ok" : "");
+      const panel = byId("panel");
+      panel.replaceChildren();
+      const head = make("div","headline");
+      head.append(make("div","ticker",symbol),make("div","price",record ? money(record.price) : "—"));
+      panel.append(head);
+      const sub = make("div","subline");
+      sub.append(make("span","",record ? plain(record.session,"Session unknown") : "AWAITING VERIFIED DATA"),make("span","",record ? plain(record.timeframe,"—") : "—"));
+      panel.append(sub,make("div","rule"),make("div","label","Current research status"));
+      const signal = plain(record?.signal?.status, "NO TRADE / NO DATA");
+      const signalNode = make("div","signal" + (record?.signal?.direction === "bullish" ? " good" : record?.signal?.direction === "bearish" ? " bad" : ""),signal);
+      panel.append(signalNode,make("div","note",record ? plain(record.signal?.summary,"No saved summary.") : DEFAULT_NOTE));
+      const levels = make("div","levels");
+      [["ENTRY",record?.signal?.entry],["INVALIDATION",record?.signal?.stop],["TARGET 1",record?.signal?.target1],["TARGET 2",record?.signal?.target2]].forEach(([label,value]) => {
+        const box = make("div","level");
+        box.append(make("strong","",money(value)),make("small","",label));
+        levels.append(box);
+      });
+      panel.append(levels);
+      byId("footer").textContent = record ? plain(state.feed.source,"Unknown source") + " · " + timeLabel(state.feed.updatedAtUTC) : "Read-only · no verified data or orders";
+    }
+    function validateFeed(candidate) {
+      if (!candidate || candidate.schemaVersion !== 1 || typeof candidate.tickers !== "object" || !candidate.tickers) throw Error("Unsupported feed schema");
+      if (candidate.updatedAtUTC !== null && candidate.updatedAtUTC !== undefined && (typeof candidate.updatedAtUTC !== "string" || Number.isNaN(Date.parse(candidate.updatedAtUTC)))) throw Error("Invalid feed timestamp");
+      return candidate;
+    }
+    async function refresh() {
+      byId("connection").textContent = "LOADING";
+      try {
+        const response = await fetch("./data/latest.json?refresh="+Date.now(), { cache:"no-store" });
+        if (!response.ok) throw Error("HTTP "+response.status);
+        state.feed = validateFeed(await response.json());
+        state.connected = true;
+        state.error = "";
+      } catch (err) {
+        state.feed = null;
+        state.connected = false;
+        state.error = err.message || "Connection failed";
+      }
+      render();
+    }
+    function speak() {
+      const symbol = TICKERS[state.selected];
+      const r = selectedRecord();
+      const words = r ? `${symbol}, saved research from ${timeLabel(state.feed.updatedAtUTC)}. Status: ${plain(r.signal?.status,"Unknown")}. ${plain(r.signal?.summary,"No summary")}. Entry ${money(r.signal?.entry)}, invalidation ${money(r.signal?.stop)}, target one ${money(r.signal?.target1)}.` : `${symbol}. Market Engine 2 is not connected. No verified prices or trading setups are available.`;
+      // Rabbit's supported Creation-to-assistant bridge. No keys or order instructions.
+      if (window.PluginMessageHandler && typeof window.PluginMessageHandler.postMessage === "function") {
+        window.PluginMessageHandler.postMessage(JSON.stringify({message:"Read the following saved research update without adding claims or recommendations: "+words,useLLM:true,wantsR1Response:true}));
+      } else if (window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function") {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(new SpeechSynthesisUtterance(words));
+      } else {
+        const footer = byId("footer");
+        footer.textContent = "Voice output needs a Rabbit R1";
+      }
+    }
+    byId("refresh").addEventListener("click",refresh);
+    byId("speak").addEventListener("click",speak);
+    window.addEventListener("scrollUp",() => { state.selected=(state.selected+TICKERS.length-1)%TICKERS.length; render(); });
+    window.addEventListener("scrollDown",() => { state.selected=(state.selected+1)%TICKERS.length; render(); });
+    window.addEventListener("sideClick",() => { state.selected=(state.selected+1)%TICKERS.length; render(); });
+    window.addEventListener("longPressEnd",speak);
+    window.marketEngineR1 = { refresh,select:(symbol) => { const at=TICKERS.indexOf(symbol); if(at !== -1) { state.selected=at; render(); } },getState:()=>({ ...state }) };
+    refresh();
+  </script>
+</body>
+</html>
